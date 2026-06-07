@@ -14,6 +14,7 @@ import signal
 import sys
 from pathlib import Path
 
+import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
@@ -44,39 +45,29 @@ logger = logging.getLogger("bot")
 
 # ── Intents requis ────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
-intents.members = True           # Requis pour on_member_join / on_member_remove
-intents.message_content = True   # Requis pour lire le contenu des messages (logs, tickets)
-intents.guilds = True            # Requis pour les infos serveur
+intents.members = True
+intents.message_content = True
+intents.guilds = True
 
 
 # ── Classe principale du Bot ──────────────────────────────────────────────────
 class CommunityBot(commands.Bot):
-    """Bot Discord communautaire avec architecture en Cogs."""
 
     def __init__(self) -> None:
         super().__init__(
-            command_prefix="!",       # Préfixe inutile (on utilise les slash commands)
+            command_prefix="!",
             intents=intents,
             owner_id=OWNER_ID,
-            help_command=None,        # On désactive la commande help par défaut
+            help_command=None,
         )
         self.db_path = DB_PATH
 
     async def setup_hook(self) -> None:
-        """Appelé automatiquement avant la connexion — charge les Cogs et synchronise les commandes."""
-
-        # Création du dossier de données si besoin
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-
-        # Initialisation de la base de données (accessible via bot.db dans tous les Cogs)
         self.db = Database(self.db_path)
 
-        # ── Chargement dynamique des Cogs ─────────────────────────────────────
         cogs_dir = Path(__file__).parent / "cogs"
         cog_files = sorted(cogs_dir.glob("cog_*.py"))
-
-        if not cog_files:
-            logger.warning("Aucun Cog trouvé dans le dossier /cogs !")
 
         for cog_path in cog_files:
             cog_module = f"cogs.{cog_path.stem}"
@@ -84,23 +75,16 @@ class CommunityBot(commands.Bot):
                 await self.load_extension(cog_module)
                 logger.info(f"✅ Cog chargé : {cog_module}")
             except Exception as e:
-                logger.error(f"❌ Erreur lors du chargement de {cog_module} : {e}", exc_info=True)
+                logger.error(f"❌ Erreur chargement {cog_module} : {e}", exc_info=True)
 
-        # ── Synchronisation des slash commands (global) ───────────────────────
-        # En développement, préférez sync sur un seul serveur pour la rapidité :
-        #   await self.tree.sync(guild=discord.Object(id=VOTRE_GUILD_ID))
         try:
-            self.tree.clear_commands(guild=None)
             synced = await self.tree.sync()
-            logger.info(f"🔄 {len(synced)} slash command(s) synchronisée(s) globalement.")
+            logger.info(f"🔄 {len(synced)} commande(s) synchronisée(s).")
         except Exception as e:
-            logger.error(f"❌ Erreur de synchronisation des commandes : {e}", exc_info=True)
+            logger.error(f"❌ Erreur sync commandes : {e}", exc_info=True)
 
     async def on_ready(self) -> None:
-        """Appelé quand le bot est connecté et prêt."""
-        logger.info(f"🤖 Connecté en tant que {self.user} (ID: {self.user.id})")
-        logger.info(f"📡 Présent sur {len(self.guilds)} serveur(s).")
-
+        logger.info(f"🤖 Connecté : {self.user} (ID: {self.user.id})")
         await self.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
@@ -108,24 +92,16 @@ class CommunityBot(commands.Bot):
             )
         )
 
-    async def on_app_command_error(
-        self,
-        interaction: discord.Interaction,
-        error: discord.app_commands.AppCommandError,
-    ) -> None:
-        """Gestionnaire global des erreurs de slash commands."""
+    async def on_app_command_error(self, interaction, error) -> None:
         if isinstance(error, discord.app_commands.MissingPermissions):
-            msg = "❌ Vous n'avez pas les permissions nécessaires pour cette commande."
+            msg = "❌ Permissions insuffisantes."
         elif isinstance(error, discord.app_commands.BotMissingPermissions):
-            msg = f"❌ Je n'ai pas les permissions nécessaires : `{error.missing_permissions}`"
+            msg = f"❌ Il me manque des permissions : `{error.missing_permissions}`"
         elif isinstance(error, discord.app_commands.CommandOnCooldown):
-            msg = f"⏳ Commande en cooldown. Réessayez dans **{error.retry_after:.1f}s**."
-        elif isinstance(error, discord.app_commands.NoPrivateMessage):
-            msg = "❌ Cette commande ne peut pas être utilisée en message privé."
+            msg = f"⏳ Réessayez dans **{error.retry_after:.1f}s**."
         else:
-            msg = f"❌ Une erreur inattendue s'est produite : `{error}`"
-            logger.error(f"Erreur non gérée sur la commande : {error}", exc_info=True)
-
+            msg = f"❌ Erreur : `{error}`"
+            logger.error(f"Erreur commande : {error}", exc_info=True)
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(msg, ephemeral=True)
@@ -135,29 +111,21 @@ class CommunityBot(commands.Bot):
             pass
 
     async def close(self) -> None:
-        """Arrêt propre du bot (appelé sur SIGTERM / SIGINT)."""
-        logger.info("🛑 Arrêt du bot en cours…")
+        logger.info("🛑 Arrêt en cours…")
         if hasattr(self, "db"):
             self.db.close()
         await super().close()
-        logger.info("✅ Bot arrêté proprement.")
 
 
-# ── Gestion des signaux OS (SIGTERM pour Railway) ────────────────────────────
 def handle_signal(bot: CommunityBot, sig: int) -> None:
-    """Déclenche l'arrêt propre du bot sur réception d'un signal."""
-    logger.info(f"📶 Signal {sig} reçu — arrêt gracieux…")
     asyncio.get_event_loop().create_task(bot.close())
 
 
-# ── Point d'entrée principal ──────────────────────────────────────────────────
 async def main() -> None:
     bot = CommunityBot()
-
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, handle_signal, bot, sig)
-
     async with bot:
         await bot.start(DISCORD_TOKEN)
 
