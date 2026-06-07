@@ -72,21 +72,6 @@ class CommunityBot(commands.Bot):
         # Initialisation de la base de données (accessible via bot.db dans tous les Cogs)
         self.db = Database(self.db_path)
 
-        # ── Chargement dynamique des Cogs ─────────────────────────────────────
-        cogs_dir = Path(__file__).parent / "cogs"
-        cog_files = sorted(cogs_dir.glob("cog_*.py"))
-
-        if not cog_files:
-            logger.warning("Aucun Cog trouvé dans le dossier /cogs !")
-
-        for cog_path in cog_files:
-            cog_module = f"cogs.{cog_path.stem}"
-            try:
-                await self.load_extension(cog_module)
-                logger.info(f"✅ Cog chargé : {cog_module}")
-            except Exception as e:
-                logger.error(f"❌ Erreur lors du chargement de {cog_module} : {e}", exc_info=True)
-
         # ── Synchronisation des slash commands (global) ───────────────────────
         # En développement, préférez sync sur un seul serveur pour la rapidité :
         #   await self.tree.sync(guild=discord.Object(id=VOTRE_GUILD_ID))
