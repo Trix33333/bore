@@ -14,7 +14,6 @@ import signal
 import sys
 from pathlib import Path
 
-import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
