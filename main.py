@@ -1,10 +1,10 @@
 """
 main.py — Point d'entrée du bot Discord communautaire.
 
-⚠️  RAILWAY : Le système de fichiers est ÉPHÉMÈRE.
-    Les fichiers créés (SQLite, transcripts) seront perdus à chaque redéploiement.
-    → Activez un Volume Railway (ex: monté sur /data) et changez DB_PATH ci-dessous.
-    → Ou utilisez une base externe (PostgreSQL via Railway, PlanetScale, Supabase…).
+⚠️ RAILWAY : Le système de fichiers est ÉPHÉMÈRE.
+Les fichiers créés (SQLite, transcripts) seront perdus à chaque redéploiement.
+→ Activez un Volume Railway (ex: monté sur /data) et changez DB_PATH ci-dessous.
+→ Ou utilisez une base externe (PostgreSQL via Railway, Supabase, etc.).
 """
 
 import asyncio
@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 
 from database import Database
 
+
 # ── Chargement des variables d'environnement ──────────────────────────────────
 load_dotenv()
 
@@ -32,6 +33,7 @@ DB_PATH: str = os.getenv("DB_PATH", "data/bot.db")
 if not DISCORD_TOKEN:
     sys.exit("❌ DISCORD_TOKEN manquant dans les variables d'environnement.")
 
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -43,50 +45,53 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bot")
 
+
 # ── Intents requis ────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
-intents.members = True           # Requis pour on_member_join / on_member_remove
-intents.message_content = True   # Requis pour lire le contenu des messages (logs, tickets)
-intents.guilds = True            # Requis pour les infos serveur
+intents.members = True
+intents.message_content = True
+intents.guilds = True
 
 
 # ── Classe principale du Bot ──────────────────────────────────────────────────
 class CommunityBot(commands.Bot):
-    """Bot Discord communautaire avec architecture en Cogs."""
+    """Bot Discord communautaire avec gestion modulaire via Cogs."""
 
     def __init__(self) -> None:
         super().__init__(
-            command_prefix="!",       # Préfixe inutile (on utilise les slash commands)
+            command_prefix="!",
             intents=intents,
             owner_id=OWNER_ID,
-            help_command=None,        # On désactive la commande help par défaut
+            help_command=None,
         )
         self.db_path = DB_PATH
+        self.db: Database | None = None
 
     async def setup_hook(self) -> None:
-        """Appelé automatiquement avant la connexion — charge les Cogs et synchronise les commandes."""
-
-        # Création du dossier de données si besoin
+        """Initialise la base de données et charge les cogs."""
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-
-        # Initialisation de la base de données (accessible via bot.db dans tous les Cogs)
         self.db = Database(self.db_path)
 
-        # ── Synchronisation des slash commands (global) ───────────────────────
-        # En développement, préférez sync sur un seul serveur pour la rapidité :
-        #   await self.tree.sync(guild=discord.Object(id=VOTRE_GUILD_ID))
+        cogs_dir = Path(__file__).parent / "cogs"
+        cog_files = sorted(cogs_dir.glob("cog_*.py"))
+
+        for cog_path in cog_files:
+            cog_module = f"cogs.{cog_path.stem}"
+            try:
+                await self.load_extension(cog_module)
+                logger.info(f"✅ Cog chargé : {cog_module}")
+            except Exception as e:
+                logger.error(f"❌ Erreur chargement {cog_module} : {e}", exc_info=True)
+
         try:
-            self.tree.clear_commands(guild=None)
             synced = await self.tree.sync()
-            logger.info(f"🔄 {len(synced)} slash command(s) synchronisée(s) globalement.")
+            logger.info(f"🔄 {len(synced)} commande(s) synchronisée(s).")
         except Exception as e:
-            logger.error(f"❌ Erreur de synchronisation des commandes : {e}", exc_info=True)
+            logger.error(f"❌ Erreur sync commandes : {e}", exc_info=True)
 
     async def on_ready(self) -> None:
-        """Appelé quand le bot est connecté et prêt."""
-        logger.info(f"🤖 Connecté en tant que {self.user} (ID: {self.user.id})")
-        logger.info(f"📡 Présent sur {len(self.guilds)} serveur(s).")
-
+        """Appelé lorsque le bot est connecté et prêt."""
+        logger.info(f"🤖 Connecté : {self.user} (ID: {self.user.id})")
         await self.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
@@ -99,18 +104,17 @@ class CommunityBot(commands.Bot):
         interaction: discord.Interaction,
         error: discord.app_commands.AppCommandError,
     ) -> None:
-        """Gestionnaire global des erreurs de slash commands."""
+        """Gestion globale des erreurs des slash commands."""
         if isinstance(error, discord.app_commands.MissingPermissions):
-            msg = "❌ Vous n'avez pas les permissions nécessaires pour cette commande."
+            msg = "❌ Permissions insuffisantes."
         elif isinstance(error, discord.app_commands.BotMissingPermissions):
-            msg = f"❌ Je n'ai pas les permissions nécessaires : `{error.missing_permissions}`"
+            missing = ", ".join(error.missing_permissions)
+            msg = f"❌ Il me manque des permissions : `{missing}`"
         elif isinstance(error, discord.app_commands.CommandOnCooldown):
-            msg = f"⏳ Commande en cooldown. Réessayez dans **{error.retry_after:.1f}s**."
-        elif isinstance(error, discord.app_commands.NoPrivateMessage):
-            msg = "❌ Cette commande ne peut pas être utilisée en message privé."
+            msg = f"⏳ Réessayez dans **{error.retry_after:.1f}s**."
         else:
-            msg = f"❌ Une erreur inattendue s'est produite : `{error}`"
-            logger.error(f"Erreur non gérée sur la commande : {error}", exc_info=True)
+            msg = f"❌ Erreur : `{error}`"
+            logger.error(f"Erreur commande : {error}", exc_info=True)
 
         try:
             if interaction.response.is_done():
@@ -121,26 +125,23 @@ class CommunityBot(commands.Bot):
             pass
 
     async def close(self) -> None:
-        """Arrêt propre du bot (appelé sur SIGTERM / SIGINT)."""
-        logger.info("🛑 Arrêt du bot en cours…")
-        if hasattr(self, "db"):
+        """Ferme proprement le bot et la base de données."""
+        logger.info("🛑 Arrêt en cours…")
+        if hasattr(self, "db") and self.db is not None:
             self.db.close()
         await super().close()
-        logger.info("✅ Bot arrêté proprement.")
 
 
-# ── Gestion des signaux OS (SIGTERM pour Railway) ────────────────────────────
 def handle_signal(bot: CommunityBot, sig: int) -> None:
-    """Déclenche l'arrêt propre du bot sur réception d'un signal."""
-    logger.info(f"📶 Signal {sig} reçu — arrêt gracieux…")
+    """Gère les signaux d'arrêt (SIGTERM, SIGINT) pour un shutdown propre."""
     asyncio.get_event_loop().create_task(bot.close())
 
 
-# ── Point d'entrée principal ──────────────────────────────────────────────────
 async def main() -> None:
+    """Point d'entrée asynchrone du bot."""
     bot = CommunityBot()
-
     loop = asyncio.get_event_loop()
+
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, handle_signal, bot, sig)
 
