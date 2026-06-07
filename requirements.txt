@@ -1,6 +1,12 @@
 """
 main.py — Point d'entrée du bot Discord communautaire.
+Voici exactement les 3 lignes à coller :
 
+```
+discord.py>=2.3.2,<3.0.0
+python-dotenv>=1.0.0
+aiohttp>=3.9.0,<4.0.0
+```
 ⚠️  RAILWAY : Le système de fichiers est ÉPHÉMÈRE.
     Les fichiers créés (SQLite, transcripts) seront perdus à chaque redéploiement.
     → Activez un Volume Railway (ex: monté sur /data) et changez DB_PATH ci-dessous.
