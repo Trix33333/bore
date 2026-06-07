@@ -1,102 +1,167 @@
+"""
+main.py — Point d'entrée du bot Discord communautaire.
+
+⚠️  RAILWAY : Le système de fichiers est ÉPHÉMÈRE.
+    Les fichiers créés (SQLite, transcripts) seront perdus à chaque redéploiement.
+    → Activez un Volume Railway (ex: monté sur /data) et changez DB_PATH ci-dessous.
+    → Ou utilisez une base externe (PostgreSQL via Railway, PlanetScale, Supabase…).
+"""
+
+import asyncio
 import logging
-import sqlite3
+import os
+import signal
+import sys
 from pathlib import Path
-from typing import Any, Optional
 
-logger = logging.getLogger("bot.database")
+import discord
+from discord.ext import commands
+from dotenv import load_dotenv
+
+from database import Database
+
+# ── Chargement des variables d'environnement ──────────────────────────────────
+load_dotenv()
+
+DISCORD_TOKEN: str = os.getenv("DISCORD_TOKEN", "")
+OWNER_ID: int = int(os.getenv("OWNER_ID", "0"))
+
+# ⚠️ RAILWAY VOLUME : changez ce chemin vers votre volume persistant, ex: /data/bot.db
+DB_PATH: str = os.getenv("DB_PATH", "data/bot.db")
+
+if not DISCORD_TOKEN:
+    sys.exit("❌ DISCORD_TOKEN manquant dans les variables d'environnement.")
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+logger = logging.getLogger("bot")
+
+# ── Intents requis ────────────────────────────────────────────────────────────
+intents = discord.Intents.default()
+intents.members = True           # Requis pour on_member_join / on_member_remove
+intents.message_content = True   # Requis pour lire le contenu des messages (logs, tickets)
+intents.guilds = True            # Requis pour les infos serveur
 
 
-class Database:
+# ── Classe principale du Bot ──────────────────────────────────────────────────
+class CommunityBot(commands.Bot):
+    """Bot Discord communautaire avec architecture en Cogs."""
 
-    def __init__(self, db_path: str) -> None:
-        self.db_path = db_path
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn: Optional[sqlite3.Connection] = None
-        self._initialize()
-
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
-
-    def _initialize(self) -> None:
-        self._conn = self._connect()
-        with self._conn:
-            self._conn.executescript("""
-                CREATE TABLE IF NOT EXISTS guild_config (
-                    guild_id         INTEGER PRIMARY KEY,
-                    welcome_channel  INTEGER,
-                    announce_channel INTEGER,
-                    log_channel      INTEGER,
-                    ticket_category  INTEGER,
-                    staff_role       INTEGER,
-                    welcome_message  TEXT DEFAULT 'Bienvenue {user_mention} sur **{server}** ! Vous etes le membre n {member_count}.',
-                    goodbye_message  TEXT DEFAULT 'Au revoir **{user}**, nous etions {member_count} membres.'
-                );
-
-                CREATE TABLE IF NOT EXISTS tickets (
-                    ticket_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id   INTEGER NOT NULL,
-                    channel_id INTEGER NOT NULL UNIQUE,
-                    creator_id INTEGER NOT NULL,
-                    created_at TEXT DEFAULT (datetime('now')),
-                    closed_at  TEXT,
-                    status     TEXT DEFAULT 'open'
-                );
-
-                CREATE TABLE IF NOT EXISTS ticket_transcripts (
-                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ticket_id INTEGER NOT NULL REFERENCES tickets(ticket_id),
-                    content   TEXT NOT NULL,
-                    saved_at  TEXT DEFAULT (datetime('now'))
-                );
-            """)
-        logger.info(f"Base de donnees initialisee : {self.db_path}")
-
-    def execute(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
-        with self._conn:
-            return self._conn.execute(query, params)
-
-    def fetchone(self, query: str, params: tuple = ()) -> Optional[sqlite3.Row]:
-        return self._conn.execute(query, params).fetchone()
-
-    def fetchall(self, query: str, params: tuple = ()) -> list:
-        return self._conn.execute(query, params).fetchall()
-
-    def get_guild_config(self, guild_id: int) -> Optional[sqlite3.Row]:
-        return self.fetchone("SELECT * FROM guild_config WHERE guild_id = ?", (guild_id,))
-
-    def upsert_guild_config(self, guild_id: int, **kwargs: Any) -> None:
-        self.execute("INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)", (guild_id,))
-        if kwargs:
-            sets = ", ".join(f"{k} = ?" for k in kwargs)
-            values = list(kwargs.values()) + [guild_id]
-            self.execute(f"UPDATE guild_config SET {sets} WHERE guild_id = ?", tuple(values))
-
-    def create_ticket(self, guild_id: int, channel_id: int, creator_id: int) -> int:
-        cur = self.execute(
-            "INSERT INTO tickets (guild_id, channel_id, creator_id) VALUES (?, ?, ?)",
-            (guild_id, channel_id, creator_id),
+    def __init__(self) -> None:
+        super().__init__(
+            command_prefix="!",       # Préfixe inutile (on utilise les slash commands)
+            intents=intents,
+            owner_id=OWNER_ID,
+            help_command=None,        # On désactive la commande help par défaut
         )
-        return cur.lastrowid
+        self.db_path = DB_PATH
 
-    def get_ticket_by_channel(self, channel_id: int) -> Optional[sqlite3.Row]:
-        return self.fetchone("SELECT * FROM tickets WHERE channel_id = ?", (channel_id,))
+    async def setup_hook(self) -> None:
+        """Appelé automatiquement avant la connexion — charge les Cogs et synchronise les commandes."""
 
-    def close_ticket(self, channel_id: int) -> None:
-        self.execute(
-            "UPDATE tickets SET status = 'closed', closed_at = datetime('now') WHERE channel_id = ?",
-            (channel_id,),
+        # Création du dossier de données si besoin
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+
+        # Initialisation de la base de données (accessible via bot.db dans tous les Cogs)
+        self.db = Database(self.db_path)
+
+        # ── Chargement dynamique des Cogs ─────────────────────────────────────
+        cogs_dir = Path(__file__).parent / "cogs"
+        cog_files = sorted(cogs_dir.glob("cog_*.py"))
+
+        if not cog_files:
+            logger.warning("Aucun Cog trouvé dans le dossier /cogs !")
+
+        for cog_path in cog_files:
+            cog_module = f"cogs.{cog_path.stem}"
+            try:
+                await self.load_extension(cog_module)
+                logger.info(f"✅ Cog chargé : {cog_module}")
+            except Exception as e:
+                logger.error(f"❌ Erreur lors du chargement de {cog_module} : {e}", exc_info=True)
+
+        # ── Synchronisation des slash commands (global) ───────────────────────
+        # En développement, préférez sync sur un seul serveur pour la rapidité :
+        #   await self.tree.sync(guild=discord.Object(id=VOTRE_GUILD_ID))
+        try:
+            self.tree.clear_commands(guild=None)
+            synced = await self.tree.sync()
+            logger.info(f"🔄 {len(synced)} slash command(s) synchronisée(s) globalement.")
+        except Exception as e:
+            logger.error(f"❌ Erreur de synchronisation des commandes : {e}", exc_info=True)
+
+    async def on_ready(self) -> None:
+        """Appelé quand le bot est connecté et prêt."""
+        logger.info(f"🤖 Connecté en tant que {self.user} (ID: {self.user.id})")
+        logger.info(f"📡 Présent sur {len(self.guilds)} serveur(s).")
+
+        await self.change_presence(
+            activity=discord.Activity(
+                type=discord.ActivityType.watching,
+                name=f"{len(self.guilds)} serveur(s) | /help",
+            )
         )
 
-    def save_transcript(self, ticket_id: int, content: str) -> None:
-        self.execute(
-            "INSERT INTO ticket_transcripts (ticket_id, content) VALUES (?, ?)",
-            (ticket_id, content),
-        )
+    async def on_app_command_error(
+        self,
+        interaction: discord.Interaction,
+        error: discord.app_commands.AppCommandError,
+    ) -> None:
+        """Gestionnaire global des erreurs de slash commands."""
+        if isinstance(error, discord.app_commands.MissingPermissions):
+            msg = "❌ Vous n'avez pas les permissions nécessaires pour cette commande."
+        elif isinstance(error, discord.app_commands.BotMissingPermissions):
+            msg = f"❌ Je n'ai pas les permissions nécessaires : `{error.missing_permissions}`"
+        elif isinstance(error, discord.app_commands.CommandOnCooldown):
+            msg = f"⏳ Commande en cooldown. Réessayez dans **{error.retry_after:.1f}s**."
+        elif isinstance(error, discord.app_commands.NoPrivateMessage):
+            msg = "❌ Cette commande ne peut pas être utilisée en message privé."
+        else:
+            msg = f"❌ Une erreur inattendue s'est produite : `{error}`"
+            logger.error(f"Erreur non gérée sur la commande : {error}", exc_info=True)
 
-    def close(self) -> None:
-        if self._conn:
-            self._conn.close()
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+    async def close(self) -> None:
+        """Arrêt propre du bot (appelé sur SIGTERM / SIGINT)."""
+        logger.info("🛑 Arrêt du bot en cours…")
+        if hasattr(self, "db"):
+            self.db.close()
+        await super().close()
+        logger.info("✅ Bot arrêté proprement.")
+
+
+# ── Gestion des signaux OS (SIGTERM pour Railway) ────────────────────────────
+def handle_signal(bot: CommunityBot, sig: int) -> None:
+    """Déclenche l'arrêt propre du bot sur réception d'un signal."""
+    logger.info(f"📶 Signal {sig} reçu — arrêt gracieux…")
+    asyncio.get_event_loop().create_task(bot.close())
+
+
+# ── Point d'entrée principal ──────────────────────────────────────────────────
+async def main() -> None:
+    bot = CommunityBot()
+
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, handle_signal, bot, sig)
+
+    async with bot:
+        await bot.start(DISCORD_TOKEN)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
