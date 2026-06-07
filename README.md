@@ -1,273 +1,185 @@
-"""
-cogs/cog_utils.py — Commandes utilitaires communes.
+# 🤖 Bot Discord Communautaire
 
-Fonctionnalités :
-- /ping          → Latence du bot
-- /serverinfo    → Informations sur le serveur
-- /userinfo      → Informations sur un utilisateur
-- /clear <n>     → Suppression de messages (max 100)
-- /avatar        → Affiche l'avatar d'un utilisateur
-- /setup         → Configuration centralisée du bot (admin)
-"""
+Bot Discord complet orienté gestion de serveur gaming, construit avec `discord.py 2.3+` et déployable sur **Railway**.
 
-import logging
-import platform
-from datetime import datetime, timezone
+---
 
-import discord
-from discord import app_commands
-from discord.ext import commands
+## 📁 Arborescence
 
-logger = logging.getLogger("bot.utils")
+```
+discord-bot/
+├── main.py                    # Point d'entrée — charge les Cogs, gère les signaux
+├── database.py                # Couche SQLite (config, tickets, transcripts)
+├── cogs/
+│   ├── __init__.py
+│   ├── cog_welcome.py         # Bienvenue / au revoir avec placeholders
+│   ├── cog_announcements.py   # Système d'annonces avec ping de rôle
+│   ├── cog_tickets.py         # Tickets : open/close/add/remove + transcript
+│   ├── cog_utils.py           # ping, serverinfo, userinfo, clear, setup
+│   └── cog_logs.py            # Logs : joins, leaves, delete, edit, ban
+├── requirements.txt
+├── Procfile                   # Pour Railway : worker: python main.py
+├── .env.example               # Template des variables d'env
+├── .gitignore
+└── README.md
+```
 
-# ── Couleurs embed ────────────────────────────────────────────────────────────
-COLOR_INFO  = discord.Color.from_rgb(100, 149, 237)
-COLOR_OK    = discord.Color.green()
-COLOR_WARN  = discord.Color.orange()
+---
 
+## ⚙️ Discord Developer Portal — Configuration
 
-class UtilsCog(commands.Cog, name="Utilitaires"):
-    """Cog des commandes utilitaires générales."""
+### 1. Créer l'application
 
-    def __init__(self, bot: commands.Bot) -> None:
-        self.bot = bot
+1. Allez sur [discord.com/developers/applications](https://discord.com/developers/applications)
+2. Cliquez **New Application** → donnez un nom
+3. Onglet **Bot** → cliquez **Add Bot**
 
-    @property
-    def db(self):
-        return self.bot.db  # type: ignore
+### 2. Activer les Intents (OBLIGATOIRE)
 
-    # ── /ping ─────────────────────────────────────────────────────────────────
+Dans l'onglet **Bot**, activez :
+- ✅ **PRESENCE INTENT**
+- ✅ **SERVER MEMBERS INTENT** ← requis pour on_member_join/remove
+- ✅ **MESSAGE CONTENT INTENT** ← requis pour lire les messages (clear, logs)
 
-    @app_commands.command(name="ping", description="Affiche la latence du bot")
-    async def ping(self, interaction: discord.Interaction) -> None:
-        latency_ms = round(self.bot.latency * 1000)
-        color = (
-            COLOR_OK if latency_ms < 100
-            else COLOR_WARN if latency_ms < 250
-            else discord.Color.red()
-        )
-        embed = discord.Embed(
-            title="🏓 Pong !",
-            description=f"Latence WebSocket : **{latency_ms} ms**",
-            color=color,
-        )
-        await interaction.response.send_message(embed=embed)
+### 3. Récupérer le Token
 
-    # ── /serverinfo ───────────────────────────────────────────────────────────
+Onglet **Bot** → **Reset Token** → copiez-le (une seule fois visible).
 
-    @app_commands.command(name="serverinfo", description="Affiche les informations du serveur")
-    async def serverinfo(self, interaction: discord.Interaction) -> None:
-        guild = interaction.guild
+### 4. Inviter le bot sur votre serveur
 
-        # Comptage des salons par type
-        text_channels  = len(guild.text_channels)
-        voice_channels = len(guild.voice_channels)
-        categories     = len(guild.categories)
+Onglet **OAuth2 > URL Generator** :
+- Scopes : `bot`, `applications.commands`
+- Bot Permissions : `Administrator` (ou permissions granulaires selon vos besoins)
 
-        # Comptage des membres
-        total  = guild.member_count
-        bots   = sum(1 for m in guild.members if m.bot)
-        humans = total - bots
+Copiez l'URL générée et ouvrez-la dans votre navigateur.
 
-        created_at_ts = int(guild.created_at.timestamp())
+> **Note** : Les slash commands sont globales par défaut (jusqu'à 1h de propagation).
+> Pour un dev rapide, synchronisez sur un seul serveur dans `setup_hook` :
+> ```python
+> await self.tree.sync(guild=discord.Object(id=VOTRE_GUILD_ID))
+> ```
 
-        embed = discord.Embed(
-            title=f"🏠 {guild.name}",
-            color=COLOR_INFO,
-            timestamp=datetime.now(tz=timezone.utc),
-        )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        if guild.banner:
-            embed.set_image(url=guild.banner.url)
+---
 
-        embed.add_field(name="👑 Propriétaire", value=str(guild.owner), inline=True)
-        embed.add_field(name="🆔 ID", value=str(guild.id), inline=True)
-        embed.add_field(name="📅 Créé le", value=f"<t:{created_at_ts}:D> (<t:{created_at_ts}:R>)", inline=False)
-        embed.add_field(name="👥 Membres", value=f"{total} total · {humans} humains · {bots} bots", inline=False)
-        embed.add_field(name="💬 Salons", value=f"{text_channels} texte · {voice_channels} vocal · {categories} catégories", inline=False)
-        embed.add_field(name="🎭 Rôles", value=str(len(guild.roles)), inline=True)
-        embed.add_field(name="😀 Emojis", value=str(len(guild.emojis)), inline=True)
-        embed.add_field(name="🔐 Vérification", value=str(guild.verification_level).capitalize(), inline=True)
+## 🚀 Déploiement sur Railway — Guide pas-à-pas
 
-        if guild.premium_subscription_count:
-            embed.add_field(
-                name="💎 Boosts",
-                value=f"{guild.premium_subscription_count} boost(s) · Niveau {guild.premium_tier}",
-                inline=False,
-            )
+### Étape 1 — Préparer le dépôt GitHub
 
-        await interaction.response.send_message(embed=embed)
+```bash
+git init
+git add .
+git commit -m "feat: initial bot setup"
+git remote add origin https://github.com/VOTRE_USER/VOTRE_REPO.git
+git push -u origin main
+```
 
-    # ── /userinfo ─────────────────────────────────────────────────────────────
+### Étape 2 — Créer le projet Railway
 
-    @app_commands.command(name="userinfo", description="Affiche les informations d'un membre")
-    @app_commands.describe(membre="Membre à inspecter (vous-même par défaut)")
-    async def userinfo(
-        self,
-        interaction: discord.Interaction,
-        membre: discord.Member | None = None,
-    ) -> None:
-        target = membre or interaction.user
+1. Allez sur [railway.app](https://railway.app) → **New Project**
+2. Choisissez **Deploy from GitHub repo**
+3. Sélectionnez votre dépôt
 
-        created_ts = int(target.created_at.timestamp())
-        joined_ts  = int(target.joined_at.timestamp()) if target.joined_at else 0
+### Étape 3 — Variables d'environnement
 
-        # Rôles (on enlève @everyone)
-        roles = [r.mention for r in reversed(target.roles) if r.name != "@everyone"]
-        roles_str = " ".join(roles[:15]) if roles else "Aucun"
-        if len(target.roles) > 16:
-            roles_str += f" … (+{len(target.roles) - 16})"
+Dans **Settings > Variables**, ajoutez :
 
-        badges = []
-        if target.bot:
-            badges.append("🤖 Bot")
-        if target.guild_permissions.administrator:
-            badges.append("🛡️ Admin")
-        if target.premium_since:
-            badges.append("💎 Booster")
+| Variable | Valeur |
+|---|---|
+| `DISCORD_TOKEN` | Votre token Discord |
+| `OWNER_ID` | Votre ID Discord |
+| `DB_PATH` | `/data/bot.db` (si Volume activé) |
 
-        embed = discord.Embed(
-            title=f"👤 {target.display_name}",
-            color=target.color if target.color != discord.Color.default() else COLOR_INFO,
-            timestamp=datetime.now(tz=timezone.utc),
-        )
-        embed.set_thumbnail(url=target.display_avatar.url)
-        embed.add_field(name="🏷️ Tag", value=str(target), inline=True)
-        embed.add_field(name="🆔 ID", value=str(target.id), inline=True)
-        embed.add_field(name="🎖️ Badges", value=" · ".join(badges) if badges else "Aucun", inline=True)
-        embed.add_field(name="📅 Compte créé", value=f"<t:{created_ts}:D> (<t:{created_ts}:R>)", inline=False)
-        if joined_ts:
-            embed.add_field(name="📥 A rejoint le", value=f"<t:{joined_ts}:D> (<t:{joined_ts}:R>)", inline=False)
-        embed.add_field(name=f"🎭 Rôles ({len(roles)})", value=roles_str, inline=False)
+### Étape 4 — Volume persistant (IMPORTANT)
 
-        await interaction.response.send_message(embed=embed)
+> ⚠️ Railway a un **système de fichiers éphémère** : sans Volume, la base de données SQLite est réinitialisée à chaque redéploiement.
 
-    # ── /clear ────────────────────────────────────────────────────────────────
+Pour activer la persistance :
+1. Dans votre service Railway → onglet **Volumes**
+2. Cliquez **New Volume**
+3. **Mount Path** : `/data`
+4. Définissez `DB_PATH=/data/bot.db` dans vos variables
 
-    @app_commands.command(name="clear", description="Supprime des messages (max 100)")
-    @app_commands.default_permissions(manage_messages=True)
-    @app_commands.describe(
-        nombre="Nombre de messages à supprimer (1–100)",
-        membre="Supprimer uniquement les messages de ce membre (optionnel)",
-    )
-    async def clear(
-        self,
-        interaction: discord.Interaction,
-        nombre: app_commands.Range[int, 1, 100],
-        membre: discord.Member | None = None,
-    ) -> None:
-        await interaction.response.defer(ephemeral=True)
+### Étape 5 — Vérifier le Procfile
 
-        def check(msg: discord.Message) -> bool:
-            return membre is None or msg.author == membre
+Railway lit automatiquement votre `Procfile`. Vérifiez que le service est en mode **Worker** (pas Web) dans les paramètres Railway.
 
-        try:
-            deleted = await interaction.channel.purge(limit=nombre, check=check)
-            qualifier = f" de {membre.display_name}" if membre else ""
-            embed = discord.Embed(
-                description=f"🗑️ **{len(deleted)}** message(s){qualifier} supprimé(s).",
-                color=COLOR_OK,
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            logger.info(
-                f"[{interaction.guild}] {len(deleted)} messages supprimés par {interaction.user}"
-                + (f" (filtre: {membre})" if membre else "")
-            )
-        except discord.Forbidden:
-            await interaction.followup.send(
-                "❌ Je n'ai pas la permission de supprimer des messages.", ephemeral=True
-            )
+### Étape 6 — Premier déploiement
 
-    # ── /avatar ───────────────────────────────────────────────────────────────
+Poussez votre code → Railway démarre automatiquement. Consultez les logs en temps réel dans l'onglet **Deployments**.
 
-    @app_commands.command(name="avatar", description="Affiche l'avatar d'un membre en grand")
-    @app_commands.describe(membre="Membre dont afficher l'avatar (vous-même par défaut)")
-    async def avatar(
-        self,
-        interaction: discord.Interaction,
-        membre: discord.Member | None = None,
-    ) -> None:
-        target = membre or interaction.user
-        embed = discord.Embed(
-            title=f"🖼️ Avatar de {target.display_name}",
-            color=COLOR_INFO,
-        )
-        embed.set_image(url=target.display_avatar.with_size(1024).url)
-        embed.add_field(
-            name="Liens",
-            value=" | ".join([
-                f"[PNG]({target.display_avatar.with_format('png').url})",
-                f"[JPG]({target.display_avatar.with_format('jpg').url})",
-                f"[WEBP]({target.display_avatar.with_format('webp').url})",
-            ]),
-        )
-        await interaction.response.send_message(embed=embed)
+---
 
-    # ── /setup ────────────────────────────────────────────────────────────────
+## 🎮 Commandes disponibles
 
-    setup_group = app_commands.Group(
-        name="setup",
-        description="Configuration centralisée du bot",
-        default_permissions=discord.Permissions(administrator=True),
-    )
+### 🎉 Bienvenue
+| Commande | Description |
+|---|---|
+| `/welcome set-channel #salon` | Définit le salon de bienvenue |
+| `/welcome set-join-message <msg>` | Personnalise le message d'arrivée |
+| `/welcome set-leave-message <msg>` | Personnalise le message de départ |
+| `/welcome test` | Prévisualise le message |
 
-    @setup_group.command(name="staff-role", description="Définit le rôle staff")
-    @app_commands.describe(role="Rôle qui aura les accès staff")
-    async def setup_staff_role(
-        self, interaction: discord.Interaction, role: discord.Role
-    ) -> None:
-        self.db.upsert_guild_config(interaction.guild_id, staff_role=role.id)
-        await interaction.response.send_message(
-            f"✅ Rôle staff défini sur {role.mention}", ephemeral=True
-        )
+**Placeholders** : `{user}`, `{user_mention}`, `{username}`, `{server}`, `{member_count}`
 
-    @setup_group.command(name="log-channel", description="Définit le salon de logs")
-    @app_commands.describe(channel="Salon où envoyer les logs du bot")
-    async def setup_log_channel(
-        self, interaction: discord.Interaction, channel: discord.TextChannel
-    ) -> None:
-        self.db.upsert_guild_config(interaction.guild_id, log_channel=channel.id)
-        await interaction.response.send_message(
-            f"✅ Salon de logs défini sur {channel.mention}", ephemeral=True
-        )
+### 📢 Annonces
+| Commande | Description |
+|---|---|
+| `/announce <message>` | Envoie une annonce |
+| `/announce-setup channel #salon` | Configure le salon d'annonces |
 
-    @setup_group.command(name="view", description="Affiche la configuration complète du serveur")
-    async def setup_view(self, interaction: discord.Interaction) -> None:
-        config = self.db.get_guild_config(interaction.guild_id)
+### 🎫 Tickets
+| Commande | Description |
+|---|---|
+| `/ticket open [raison]` | Ouvre un ticket |
+| `/ticket close` | Ferme le ticket (avec transcript) |
+| `/ticket add @user` | Ajoute un membre au ticket |
+| `/ticket remove @user` | Retire un membre |
+| `/ticket-setup category` | Configure la catégorie |
 
-        def resolve_channel(cid) -> str:
-            if not cid:
-                return "❌ Non configuré"
-            ch = interaction.guild.get_channel(cid)
-            return ch.mention if ch else f"❌ Introuvable (ID: {cid})"
+### 🛠️ Utilitaires
+| Commande | Description |
+|---|---|
+| `/ping` | Latence du bot |
+| `/serverinfo` | Infos du serveur |
+| `/userinfo [@user]` | Infos d'un membre |
+| `/clear <n> [@user]` | Supprime des messages |
+| `/avatar [@user]` | Affiche un avatar |
 
-        def resolve_role(rid) -> str:
-            if not rid:
-                return "❌ Non configuré"
-            r = interaction.guild.get_role(rid)
-            return r.mention if r else f"❌ Introuvable (ID: {rid})"
+### ⚙️ Setup (Admin)
+| Commande | Description |
+|---|---|
+| `/setup staff-role @role` | Définit le rôle staff |
+| `/setup log-channel #salon` | Définit le salon de logs |
+| `/setup view` | Affiche toute la configuration |
 
-        def resolve_category(cid) -> str:
-            if not cid:
-                return "❌ Non configuré"
-            cat = interaction.guild.get_channel(cid)
-            return f"📁 {cat.name}" if cat else f"❌ Introuvable (ID: {cid})"
+---
 
-        embed = discord.Embed(
-            title="⚙️ Configuration du serveur",
-            color=COLOR_INFO,
-            timestamp=datetime.now(tz=timezone.utc),
-        )
-        embed.add_field(name="🎉 Bienvenue", value=resolve_channel(config["welcome_channel"] if config else None), inline=True)
-        embed.add_field(name="📢 Annonces", value=resolve_channel(config["announce_channel"] if config else None), inline=True)
-        embed.add_field(name="📜 Logs", value=resolve_channel(config["log_channel"] if config else None), inline=True)
-        embed.add_field(name="🎫 Catégorie tickets", value=resolve_category(config["ticket_category"] if config else None), inline=True)
-        embed.add_field(name="🛡️ Rôle staff", value=resolve_role(config["staff_role"] if config else None), inline=True)
-        embed.set_footer(text=f"Bot v1.0.0 · Python {platform.python_version()} · discord.py")
+## 🔧 Développement local
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+```bash
+# Cloner et installer
+git clone https://github.com/VOTRE_USER/VOTRE_REPO.git
+cd discord-bot
 
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(UtilsCog(bot))
+pip install -r requirements.txt
+
+# Configurer
+cp .env.example .env
+# Éditez .env avec votre token
+
+# Lancer
+python main.py
+```
+
+---
+
+## 📝 Notes techniques
+
+- **SQLite WAL mode** activé pour de meilleures performances concurrentes
+- **Arrêt gracieux** sur SIGTERM/SIGINT (Railway l'envoie avant de tuer le conteneur)
+- **Cogs chargés dynamiquement** : ajoutez un fichier `cog_*.py` dans `/cogs`, il est détecté automatiquement
+- **Gestion d'erreurs globale** : toutes les erreurs de slash commands sont catchées dans `on_app_command_error`
+- **Transcripts** stockés en BDD SQLite et envoyés en fichier `.txt` dans le salon de logs
