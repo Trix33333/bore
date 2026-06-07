@@ -1,102 +1,185 @@
-import logging
-import sqlite3
-from pathlib import Path
-from typing import Any, Optional
+# 🤖 Bot Discord Communautaire
 
-logger = logging.getLogger("bot.database")
+Bot Discord complet orienté gestion de serveur gaming, construit avec `discord.py 2.3+` et déployable sur **Railway**.
 
+---
 
-class Database:
+## 📁 Arborescence
 
-    def __init__(self, db_path: str) -> None:
-        self.db_path = db_path
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn: Optional[sqlite3.Connection] = None
-        self._initialize()
+```
+discord-bot/
+├── main.py                    # Point d'entrée — charge les Cogs, gère les signaux
+├── database.py                # Couche SQLite (config, tickets, transcripts)
+├── cogs/
+│   ├── __init__.py
+│   ├── cog_welcome.py         # Bienvenue / au revoir avec placeholders
+│   ├── cog_announcements.py   # Système d'annonces avec ping de rôle
+│   ├── cog_tickets.py         # Tickets : open/close/add/remove + transcript
+│   ├── cog_utils.py           # ping, serverinfo, userinfo, clear, setup
+│   └── cog_logs.py            # Logs : joins, leaves, delete, edit, ban
+├── requirements.txt
+├── Procfile                   # Pour Railway : worker: python main.py
+├── .env.example               # Template des variables d'env
+├── .gitignore
+└── README.md
+```
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+---
 
-    def _initialize(self) -> None:
-        self._conn = self._connect()
-        with self._conn:
-            self._conn.executescript("""
-                CREATE TABLE IF NOT EXISTS guild_config (
-                    guild_id         INTEGER PRIMARY KEY,
-                    welcome_channel  INTEGER,
-                    announce_channel INTEGER,
-                    log_channel      INTEGER,
-                    ticket_category  INTEGER,
-                    staff_role       INTEGER,
-                    welcome_message  TEXT DEFAULT 'Bienvenue {user_mention} sur **{server}** ! Vous etes le membre n {member_count}.',
-                    goodbye_message  TEXT DEFAULT 'Au revoir **{user}**, nous etions {member_count} membres.'
-                );
+## ⚙️ Discord Developer Portal — Configuration
 
-                CREATE TABLE IF NOT EXISTS tickets (
-                    ticket_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id   INTEGER NOT NULL,
-                    channel_id INTEGER NOT NULL UNIQUE,
-                    creator_id INTEGER NOT NULL,
-                    created_at TEXT DEFAULT (datetime('now')),
-                    closed_at  TEXT,
-                    status     TEXT DEFAULT 'open'
-                );
+### 1. Créer l'application
 
-                CREATE TABLE IF NOT EXISTS ticket_transcripts (
-                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ticket_id INTEGER NOT NULL REFERENCES tickets(ticket_id),
-                    content   TEXT NOT NULL,
-                    saved_at  TEXT DEFAULT (datetime('now'))
-                );
-            """)
-        logger.info(f"Base de donnees initialisee : {self.db_path}")
+1. Allez sur [discord.com/developers/applications](https://discord.com/developers/applications)
+2. Cliquez **New Application** → donnez un nom
+3. Onglet **Bot** → cliquez **Add Bot**
 
-    def execute(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
-        with self._conn:
-            return self._conn.execute(query, params)
+### 2. Activer les Intents (OBLIGATOIRE)
 
-    def fetchone(self, query: str, params: tuple = ()) -> Optional[sqlite3.Row]:
-        return self._conn.execute(query, params).fetchone()
+Dans l'onglet **Bot**, activez :
+- ✅ **PRESENCE INTENT**
+- ✅ **SERVER MEMBERS INTENT** ← requis pour on_member_join/remove
+- ✅ **MESSAGE CONTENT INTENT** ← requis pour lire les messages (clear, logs)
 
-    def fetchall(self, query: str, params: tuple = ()) -> list:
-        return self._conn.execute(query, params).fetchall()
+### 3. Récupérer le Token
 
-    def get_guild_config(self, guild_id: int) -> Optional[sqlite3.Row]:
-        return self.fetchone("SELECT * FROM guild_config WHERE guild_id = ?", (guild_id,))
+Onglet **Bot** → **Reset Token** → copiez-le (une seule fois visible).
 
-    def upsert_guild_config(self, guild_id: int, **kwargs: Any) -> None:
-        self.execute("INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)", (guild_id,))
-        if kwargs:
-            sets = ", ".join(f"{k} = ?" for k in kwargs)
-            values = list(kwargs.values()) + [guild_id]
-            self.execute(f"UPDATE guild_config SET {sets} WHERE guild_id = ?", tuple(values))
+### 4. Inviter le bot sur votre serveur
 
-    def create_ticket(self, guild_id: int, channel_id: int, creator_id: int) -> int:
-        cur = self.execute(
-            "INSERT INTO tickets (guild_id, channel_id, creator_id) VALUES (?, ?, ?)",
-            (guild_id, channel_id, creator_id),
-        )
-        return cur.lastrowid
+Onglet **OAuth2 > URL Generator** :
+- Scopes : `bot`, `applications.commands`
+- Bot Permissions : `Administrator` (ou permissions granulaires selon vos besoins)
 
-    def get_ticket_by_channel(self, channel_id: int) -> Optional[sqlite3.Row]:
-        return self.fetchone("SELECT * FROM tickets WHERE channel_id = ?", (channel_id,))
+Copiez l'URL générée et ouvrez-la dans votre navigateur.
 
-    def close_ticket(self, channel_id: int) -> None:
-        self.execute(
-            "UPDATE tickets SET status = 'closed', closed_at = datetime('now') WHERE channel_id = ?",
-            (channel_id,),
-        )
+> **Note** : Les slash commands sont globales par défaut (jusqu'à 1h de propagation).
+> Pour un dev rapide, synchronisez sur un seul serveur dans `setup_hook` :
+> ```python
+> await self.tree.sync(guild=discord.Object(id=VOTRE_GUILD_ID))
+> ```
 
-    def save_transcript(self, ticket_id: int, content: str) -> None:
-        self.execute(
-            "INSERT INTO ticket_transcripts (ticket_id, content) VALUES (?, ?)",
-            (ticket_id, content),
-        )
+---
 
-    def close(self) -> None:
-        if self._conn:
-            self._conn.close()
+## 🚀 Déploiement sur Railway — Guide pas-à-pas
+
+### Étape 1 — Préparer le dépôt GitHub
+
+```bash
+git init
+git add .
+git commit -m "feat: initial bot setup"
+git remote add origin https://github.com/VOTRE_USER/VOTRE_REPO.git
+git push -u origin main
+```
+
+### Étape 2 — Créer le projet Railway
+
+1. Allez sur [railway.app](https://railway.app) → **New Project**
+2. Choisissez **Deploy from GitHub repo**
+3. Sélectionnez votre dépôt
+
+### Étape 3 — Variables d'environnement
+
+Dans **Settings > Variables**, ajoutez :
+
+| Variable | Valeur |
+|---|---|
+| `DISCORD_TOKEN` | Votre token Discord |
+| `OWNER_ID` | Votre ID Discord |
+| `DB_PATH` | `/data/bot.db` (si Volume activé) |
+
+### Étape 4 — Volume persistant (IMPORTANT)
+
+> ⚠️ Railway a un **système de fichiers éphémère** : sans Volume, la base de données SQLite est réinitialisée à chaque redéploiement.
+
+Pour activer la persistance :
+1. Dans votre service Railway → onglet **Volumes**
+2. Cliquez **New Volume**
+3. **Mount Path** : `/data`
+4. Définissez `DB_PATH=/data/bot.db` dans vos variables
+
+### Étape 5 — Vérifier le Procfile
+
+Railway lit automatiquement votre `Procfile`. Vérifiez que le service est en mode **Worker** (pas Web) dans les paramètres Railway.
+
+### Étape 6 — Premier déploiement
+
+Poussez votre code → Railway démarre automatiquement. Consultez les logs en temps réel dans l'onglet **Deployments**.
+
+---
+
+## 🎮 Commandes disponibles
+
+### 🎉 Bienvenue
+| Commande | Description |
+|---|---|
+| `/welcome set-channel #salon` | Définit le salon de bienvenue |
+| `/welcome set-join-message <msg>` | Personnalise le message d'arrivée |
+| `/welcome set-leave-message <msg>` | Personnalise le message de départ |
+| `/welcome test` | Prévisualise le message |
+
+**Placeholders** : `{user}`, `{user_mention}`, `{username}`, `{server}`, `{member_count}`
+
+### 📢 Annonces
+| Commande | Description |
+|---|---|
+| `/announce <message>` | Envoie une annonce |
+| `/announce-setup channel #salon` | Configure le salon d'annonces |
+
+### 🎫 Tickets
+| Commande | Description |
+|---|---|
+| `/ticket open [raison]` | Ouvre un ticket |
+| `/ticket close` | Ferme le ticket (avec transcript) |
+| `/ticket add @user` | Ajoute un membre au ticket |
+| `/ticket remove @user` | Retire un membre |
+| `/ticket-setup category` | Configure la catégorie |
+
+### 🛠️ Utilitaires
+| Commande | Description |
+|---|---|
+| `/ping` | Latence du bot |
+| `/serverinfo` | Infos du serveur |
+| `/userinfo [@user]` | Infos d'un membre |
+| `/clear <n> [@user]` | Supprime des messages |
+| `/avatar [@user]` | Affiche un avatar |
+
+### ⚙️ Setup (Admin)
+| Commande | Description |
+|---|---|
+| `/setup staff-role @role` | Définit le rôle staff |
+| `/setup log-channel #salon` | Définit le salon de logs |
+| `/setup view` | Affiche toute la configuration |
+
+---
+
+## 🔧 Développement local
+
+```bash
+# Cloner et installer
+git clone https://github.com/VOTRE_USER/VOTRE_REPO.git
+cd discord-bot
+
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+pip install -r requirements.txt
+
+# Configurer
+cp .env.example .env
+# Éditez .env avec votre token
+
+# Lancer
+python main.py
+```
+
+---
+
+## 📝 Notes techniques
+
+- **SQLite WAL mode** activé pour de meilleures performances concurrentes
+- **Arrêt gracieux** sur SIGTERM/SIGINT (Railway l'envoie avant de tuer le conteneur)
+- **Cogs chargés dynamiquement** : ajoutez un fichier `cog_*.py` dans `/cogs`, il est détecté automatiquement
+- **Gestion d'erreurs globale** : toutes les erreurs de slash commands sont catchées dans `on_app_command_error`
+- **Transcripts** stockés en BDD SQLite et envoyés en fichier `.txt` dans le salon de logs
